@@ -34,13 +34,15 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from hgcal_eval_common import (  # noqa: E402
     CMS_blue, CMS_gray, CMS_orange, CMS_red, EvalData, PHYSICS_CLASSES,
-    class_color, class_name, profile, robust_sigma, savefig, setup_style,
+    class_color, class_name, node_edges, profile, robust_sigma, savefig,
+    setup_style,
 )
 
 plt = setup_style()
 
 E_EDGES = np.array([0.0, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 250.0])
-NODE_EDGES = np.array([0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 700])
+#: replaced in main() by a binning that reaches the largest cluster in the file
+NODE_EDGES = node_edges(700)
 MASKS = [("all_queries", "all matched queries", CMS_blue),
          ("pred_valid", "pred_valid only", CMS_red)]
 
@@ -219,7 +221,7 @@ def energy_budget(data, outdir, metrics):
     ax.hist(sum_pred_v, bins=bins, histtype="step", lw=2, color=CMS_red,
             label=r"$\sum E_{\mathrm{pred}}$, pred_valid (%.0f)" % sum_pred_v.sum())
     ax.hist(sum_lc, bins=bins, histtype="step", lw=2, color=CMS_orange, ls="--",
-            label=r"$\sum E_{\mathrm{LayerCluster}}$ (%.0f)" % sum_lc.sum())
+            label=r"$\sum E_{\mathrm{%s}}$ (%.0f)" % (data.node_label, sum_lc.sum()))
     ax.set_xscale("log")
     ax.set_xlabel("event energy sum [GeV]")
     ax.set_ylabel("events / bin")
@@ -249,18 +251,18 @@ def truth_sanity(data, outdir, metrics):
     m = (data.p_e > 1e-3) & (data.p_sum_e_true_nodes > 0)
     r = data.p_sum_e_true_nodes[m] / data.p_e[m]
     ax.hist(r, bins=np.linspace(0, 2, 100), histtype="step", lw=2, color=CMS_gray,
-            label=r"$\sum E_{LC}^{\mathrm{truth\ assoc.}} / E_{\mathrm{true}}$: med %.3f"
-                  % np.median(r))
+            label=r"$\sum E_{%s}^{\mathrm{truth\ assoc.}} / E_{\mathrm{true}}$: med %.3f"
+                  % (data.node_short, np.median(r)))
     m2 = (data.p_e > 1e-3) & (data.p_sum_e_pred_nodes > 0)
     r2 = data.p_sum_e_pred_nodes[m2] / data.p_e[m2]
     ax.hist(r2, bins=np.linspace(0, 2, 100), histtype="step", lw=2, color=CMS_blue,
-            label=r"$\sum E_{LC}^{\mathrm{model\ mask}} / E_{\mathrm{true}}$: med %.3f"
-                  % np.median(r2))
+            label=r"$\sum E_{%s}^{\mathrm{model\ mask}} / E_{\mathrm{true}}$: med %.3f"
+                  % (data.node_short, np.median(r2)))
     m3 = (data.p_pred_e > 1e-3) & (data.p_sum_e_pred_nodes > 0)
     r3 = data.p_sum_e_pred_nodes[m3] / data.p_pred_e[m3]
     ax.hist(r3, bins=np.linspace(0, 2, 100), histtype="step", lw=2, color=CMS_red,
-            label=r"$\sum E_{LC}^{\mathrm{model\ mask}} / E_{\mathrm{pred}}$: med %.3f"
-                  % np.median(r3))
+            label=r"$\sum E_{%s}^{\mathrm{model\ mask}} / E_{\mathrm{pred}}$: med %.3f"
+                  % (data.node_short, np.median(r3)))
     ax.axvline(1, color="k", ls="--", lw=1.5)
     ax.set_xlabel("energy ratio")
     ax.set_ylabel("SimClusters / bin")
@@ -320,8 +322,8 @@ def alternative_targets(data, outdir, metrics):
     cands = {
         "recEnergy": data.p_e,
         "boundaryEnergy": data.p_e_boundary,
-        "sum(LC) truth-associated": data.p_sum_e_true_nodes,
-        "sum(LC) model mask": data.p_sum_e_pred_nodes,
+        "sum(%s) truth-associated" % data.node_short: data.p_sum_e_true_nodes,
+        "sum(%s) model mask" % data.node_short: data.p_sum_e_pred_nodes,
     }
     rows = {}
     for name, t in cands.items():
@@ -356,9 +358,16 @@ def main():
     ap.add_argument("--input", required=True)
     ap.add_argument("--outdir", default="plots/maskformer_eval/energy")
     ap.add_argument("--max-events", type=int, default=None)
+    ap.add_argument("--node-collection", default=None,
+                    choices=["LayerCluster", "RecHitHGC"],
+                    help="node collection carrying the prediction "
+                         "(default: auto-detect from the file)")
     args = ap.parse_args()
 
-    data = EvalData(args.input, max_events=args.max_events)
+    data = EvalData(args.input, max_events=args.max_events,
+                    node_collection=args.node_collection)
+    global NODE_EDGES
+    NODE_EDGES = node_edges(max(data.p_pred_n_nodes.max(), data.p_n_true_nodes.max()))
     masks = get_masks(data)
     metrics = dict(dataset=data.summary())
     os.makedirs(args.outdir, exist_ok=True)
@@ -419,8 +428,11 @@ def report(m, path):
     L.append("-- ln(Epred/Etrue) vs pred_n_nodes -----------------------------------")
     r = m["logratio_vs_n_nodes"]["all_queries"]
     for c, med, s, n in zip(r["centre"], r["median"], r["sigma68"], r["n"]):
-        if med is not None:
-            L.append("  n_nodes ~ %7.1f : median %+6.3f  sigma68 %6.3f  (N=%d)" % (c, med, s, n))
+        if med is None:
+            continue
+        # a bin with 3 entries has a median but no sigma68
+        L.append("  n_nodes ~ %7.1f : median %+6.3f  sigma68 %s  (N=%d)"
+                 % (c, med, "%6.3f" % s if s is not None else "    --", n))
     txt = "\n".join(L)
     with open(path, "w") as fh:
         fh.write(txt + "\n")

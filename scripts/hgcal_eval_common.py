@@ -9,13 +9,23 @@ collections that matter here:
     particle, so index ``i`` of a ``pred`` field and index ``i`` of a truth field
     describe the same object.
 
-``LayerCluster``
-    One entry per input node.  ``LayerCluster_pred_match_idx`` is the SimCluster
-    index the model assigned the node to (``-2``/``-1`` = unassigned).  The truth
-    side is stored ragged-inside-ragged: ``LayerCluster_SimCluster_MatchIdx`` and
-    ``LayerCluster_SimCluster_MatchQual`` are the concatenation over nodes of
-    ``LayerCluster_SimClusterNumMatch`` entries each.  ``MatchQual`` is the CMS
-    association *score*, so the best match is the one with the SMALLEST value.
+``LayerCluster`` *or* ``RecHitHGC``
+    One entry per input node.  Which of the two is the model's node collection is
+    detected from the presence of ``<coll>_pred_match_idx``: that field holds the
+    SimCluster index the model assigned the node to (``-2``/``-1`` = unassigned).
+
+    The truth side differs between the two:
+
+    * ``LayerCluster`` stores it ragged-inside-ragged --
+      ``LayerCluster_SimCluster_MatchIdx`` / ``_MatchQual`` are the concatenation
+      over nodes of ``LayerCluster_SimClusterNumMatch`` entries each.
+      ``MatchQual`` is the CMS association *score*, so the best match is the one
+      with the SMALLEST value.
+    * ``RecHitHGC`` stores the already-resolved best match directly in
+      ``RecHitHGC_SimClusterBestMatchIdx`` / ``_BestMatchQual`` (``-1`` = none).
+
+    ``RecHitHGC`` has no ``eta``/``phi`` branches, so they are computed from
+    ``x``/``y``/``z``.
 """
 
 import os
@@ -120,26 +130,76 @@ def _offsets(counts):
     return off
 
 
+#: Per-node-collection accessors.  ``truth`` selects how the node -> SimCluster
+#: truth association is stored; see the module docstring.
+NODE_COLLECTIONS = {
+    "LayerCluster": dict(label="LayerCluster", short="LC", truth="ragged"),
+    "RecHitHGC": dict(label="RecHit", short="hit", truth="best"),
+}
+
+
+def _collection_fields(path, coll):
+    """Field names of one top-level collection, read from the parquet schema."""
+    import pyarrow.parquet as pq
+    schema = pq.ParquetFile(path).schema_arrow
+    if coll not in schema.names:
+        return []
+    t = schema.field(coll).type
+    return [t.field(i).name for i in range(t.num_fields)]
+
+
+def detect_node_collection(path, requested=None):
+    """Return the name of the collection carrying ``*_pred_match_idx``."""
+    found = [c for c in NODE_COLLECTIONS
+             if "%s_pred_match_idx" % c in _collection_fields(path, c)]
+    if requested is not None:
+        if requested not in NODE_COLLECTIONS:
+            raise ValueError("unknown node collection %r (known: %s)"
+                             % (requested, ", ".join(NODE_COLLECTIONS)))
+        if requested not in found:
+            raise ValueError("%s has no %s_pred_match_idx (found: %s)"
+                             % (os.path.basename(path), requested,
+                                ", ".join(found) or "none"))
+        return requested
+    if not found:
+        raise ValueError("%s: no <collection>_pred_match_idx found; looked at %s"
+                         % (os.path.basename(path), ", ".join(NODE_COLLECTIONS)))
+    if len(found) > 1:
+        raise ValueError("%s: several collections carry predictions (%s); pass "
+                         "--node-collection" % (os.path.basename(path), ", ".join(found)))
+    return found[0]
+
+
 class EvalData:
     """Flat (event-concatenated) view of one prediction file.
 
     Attributes with the ``p_`` prefix are per *particle* (SimCluster), those with
-    the ``n_`` prefix are per *node* (LayerCluster).  Node->particle pointers are
-    stored as **global** indices into the particle arrays so that everything can
-    be done with plain numpy.
+    the ``n_`` prefix are per *node* (LayerCluster or RecHit, see
+    ``node_collection``).  Node->particle pointers are stored as **global**
+    indices into the particle arrays so that everything can be done with plain
+    numpy.
     """
 
-    def __init__(self, path, max_events=None):
+    def __init__(self, path, max_events=None, node_collection=None):
         self.path = path
-        df = ak.from_parquet(path)
+        self.node_collection = detect_node_collection(path, node_collection)
+        spec = NODE_COLLECTIONS[self.node_collection]
+        #: human-readable name of the node, for plot labels ("LayerCluster"/"RecHit")
+        self.node_label = spec["label"]
+        self.node_short = spec["short"]
+
+        # only the two collections that matter: a RecHit file is ~20M nodes and
+        # the TICL / MergedSimCluster branches would double the memory for nothing
+        df = ak.from_parquet(path, columns=["SimCluster", self.node_collection])
         if max_events is not None:
             df = df[:max_events]
         self.df = df
-        sc, lc = df.SimCluster, df.LayerCluster
+        nc = self.node_collection
+        sc, lc = df.SimCluster, df[nc]
 
         self.n_events = len(df)
         self.p_count = np.asarray(ak.to_numpy(ak.num(sc.SimCluster_pdgId, axis=1)))
-        self.n_count = np.asarray(ak.to_numpy(ak.num(lc.LayerCluster_energy, axis=1)))
+        self.n_count = np.asarray(ak.to_numpy(ak.num(lc["%s_energy" % nc], axis=1)))
         self.p_off = _offsets(self.p_count)
         self.n_off = _offsets(self.n_count)
         self.p_event = np.repeat(np.arange(self.n_events), self.p_count)
@@ -172,13 +232,22 @@ class EvalData:
         self.p_pred_n_nodes = _f(sc.SimCluster_pred_n_nodes).astype(np.int64)
 
         # ---------------- node level ----------------
-        self.n_energy = _f(lc.LayerCluster_energy).astype(np.float64)
-        self.n_eta = _f(lc.LayerCluster_eta).astype(np.float64)
-        self.n_phi = _f(lc.LayerCluster_phi).astype(np.float64)
-        self.n_z = _f(lc.LayerCluster_z).astype(np.float64)
+        self.n_energy = _f(lc["%s_energy" % nc]).astype(np.float64)
+        self.n_z = _f(lc["%s_z" % nc]).astype(np.float64)
+        if "%s_eta" % nc in lc.fields:
+            self.n_eta = _f(lc["%s_eta" % nc]).astype(np.float64)
+            self.n_phi = _f(lc["%s_phi" % nc]).astype(np.float64)
+        else:
+            # RecHits only store the cartesian position
+            x = _f(lc["%s_x" % nc]).astype(np.float64)
+            y = _f(lc["%s_y" % nc]).astype(np.float64)
+            rt = np.hypot(x, y)
+            self.n_eta = np.arcsinh(np.divide(self.n_z, rt, out=np.zeros_like(rt),
+                                              where=rt > 0))
+            self.n_phi = np.arctan2(y, x)
 
-        n_pred_local = _f(lc.LayerCluster_pred_match_idx).astype(np.int64)
-        n_true_local, n_true_qual = self._best_truth_match(lc)
+        n_pred_local = _f(lc["%s_pred_match_idx" % nc]).astype(np.int64)
+        n_true_local, n_true_qual = self._truth_match(lc, nc)
         self.n_pred_local = n_pred_local
         self.n_true_local = n_true_local
         self.n_true_qual = n_true_qual
@@ -198,6 +267,16 @@ class EvalData:
         self.p_sum_e_pred_nodes = np.bincount(
             self.n_pred[self.n_pred >= 0],
             weights=self.n_energy[self.n_pred >= 0], minlength=len(self.p_e))
+
+    @classmethod
+    def _truth_match(cls, lc, nc):
+        """Return, per node, the best-matching SimCluster index and its score."""
+        if NODE_COLLECTIONS[nc]["truth"] == "best":
+            # already resolved in the file; -1 means "no association"
+            idx = _f(lc["%s_SimClusterBestMatchIdx" % nc]).astype(np.int64)
+            qual = _f(lc["%s_SimClusterBestMatchQual" % nc]).astype(np.float64)
+            return idx, np.where(idx >= 0, qual, np.nan)
+        return cls._best_truth_match(lc)
 
     @staticmethod
     def _best_truth_match(lc):
@@ -231,6 +310,8 @@ class EvalData:
     def summary(self):
         return dict(
             file=os.path.basename(self.path),
+            node_collection=self.node_collection,
+            node_label=self.node_label,
             n_events=self.n_events,
             n_particles=len(self.p_e),
             n_nodes=len(self.n_energy),
@@ -241,6 +322,18 @@ class EvalData:
 # --------------------------------------------------------------------------- #
 # small numeric helpers
 # --------------------------------------------------------------------------- #
+
+def node_edges(nmax):
+    """Node-multiplicity binning that always reaches ``nmax``.
+
+    A LayerCluster shower has O(100) nodes, a RecHit one O(1000), so the upper
+    edge cannot be hard-coded.
+    """
+    e = [0, 1, 2, 4, 8, 16, 32, 64, 128, 256]
+    while e[-1] < max(int(nmax), 1):
+        e.append(e[-1] * 2)
+    return np.array(e, dtype=float)
+
 
 def robust_sigma(x):
     """IQR/1.349 - insensitive to the long tails of a resolution distribution."""

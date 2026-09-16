@@ -30,7 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from hgcal_eval_common import (  # noqa: E402
     CLASS_INFO, CMAP_10, CMS_blue, CMS_gray, CMS_orange, CMS_red,
     EvalData, PHYSICS_CLASSES, _f, class_color, class_name, eff_profile,
-    profile, robust_sigma, savefig, setup_style, stat_label,
+    node_edges, profile, robust_sigma, savefig, setup_style, stat_label,
 )
 
 plt = setup_style()
@@ -54,7 +54,8 @@ VARIABLES = [
 
 E_EDGES = np.array([0.0, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 250.0])
 ETA_EDGES = np.linspace(1.4, 3.2, 13)
-NODE_EDGES = np.array([0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 700])
+#: replaced in main() by a binning that reaches the largest cluster in the file
+NODE_EDGES = node_edges(700)
 
 
 def residual(data, var, mask):
@@ -305,7 +306,7 @@ def plot_efficiency(data, outdir, metrics):
     ax.set_xticks(range(len(vals)))
     ax.set_xticklabels(names, fontsize=12)
     ax.set_ylim(0, max(vals) * 1.25)
-    ax.set_ylabel("fraction of LayerClusters")
+    ax.set_ylabel("fraction of %ss" % data.node_label)
     ax.set_title("Clustering (node-assignment) efficiency", fontsize=20)
     savefig(fig, sub, "clustering_efficiency_summary")
 
@@ -485,14 +486,17 @@ def plot_diagnostics(data, outdir, metrics):
 
     # pred_n_nodes vs the actual number of assigned nodes
     fig, ax = plt.subplots()
-    ax.hist(data.p_pred_n_nodes, bins=np.logspace(0, 3, 40), histtype="step", lw=2,
+    top = max(data.p_pred_n_nodes.max(), data.p_n_pred_nodes.max(),
+              data.p_n_true_nodes.max(), 10)
+    nbins = np.logspace(0, np.log10(top) + 0.05, 40)
+    ax.hist(data.p_pred_n_nodes, bins=nbins, histtype="step", lw=2,
             color=CMS_blue, label="pred_n_nodes (mask above threshold)")
-    ax.hist(data.p_n_pred_nodes, bins=np.logspace(0, 3, 40), histtype="step", lw=2,
+    ax.hist(data.p_n_pred_nodes, bins=nbins, histtype="step", lw=2,
             color=CMS_red, label="nodes with pred_match_idx = i (exclusive)")
-    ax.hist(data.p_n_true_nodes, bins=np.logspace(0, 3, 40), histtype="step", lw=2,
+    ax.hist(data.p_n_true_nodes, bins=nbins, histtype="step", lw=2,
             color=CMS_gray, label="nodes truly belonging to i")
     ax.set_xscale("log"); ax.set_yscale("log")
-    ax.set_xlabel("number of nodes per SimCluster")
+    ax.set_xlabel("number of %ss per SimCluster" % data.node_label)
     ax.set_ylabel("SimClusters / bin")
     ax.set_title("Node multiplicity: mask vs exclusive assignment", fontsize=19)
     ax.legend(fontsize=12)
@@ -629,11 +633,21 @@ def main():
     ap.add_argument("--input", required=True)
     ap.add_argument("--outdir", default="plots/maskformer_eval")
     ap.add_argument("--max-events", type=int, default=None)
+    ap.add_argument("--node-collection", default=None,
+                    choices=["LayerCluster", "RecHitHGC"],
+                    help="node collection carrying the prediction "
+                         "(default: auto-detect from the file)")
     args = ap.parse_args()
 
     print("[eval] loading %s" % args.input)
-    data = EvalData(args.input, max_events=args.max_events)
+    data = EvalData(args.input, max_events=args.max_events,
+                    node_collection=args.node_collection)
     print("[eval] %s" % data.summary())
+
+    # the node multiplicity per shower is ~10x larger for RecHits than for
+    # LayerClusters, so the binning has to follow the file
+    global NODE_EDGES
+    NODE_EDGES = node_edges(max(data.p_pred_n_nodes.max(), data.p_n_true_nodes.max()))
 
     metrics = dict(dataset=data.summary())
     os.makedirs(args.outdir, exist_ok=True)
@@ -668,7 +682,7 @@ def write_summary(m, path):
     L.append("file            : %s" % d["file"])
     L.append("events          : %d" % d["n_events"])
     L.append("SimClusters     : %d" % d["n_particles"])
-    L.append("LayerClusters   : %d" % d["n_nodes"])
+    L.append("%-16s: %d" % (d.get("node_label", "nodes") + "s", d["n_nodes"]))
     L.append("pred_valid rate : %.4f" % d["valid_fraction"])
     L.append("")
     L.append("-- inclusive resolution (median / sigma68) ------------------------")
