@@ -46,6 +46,30 @@ the file/outdir above):
 ./scripts/run_all.sh [prediction.parquet] [outdir]
 ```
 
+### Shower shapes by particle type
+
+`plot_shower_profiles.py` makes the event display behind the "EM showers are
+compact, hadronic ones are not" statement: in a single event it picks one
+particle per type (photon, electron, charged hadron, neutral hadron -- the
+`class_labels` pdgId mapping of `hgcal_eval_common`) and scatters its
+LayerClusters as HGCAL layer vs. `y`, with the marker area scaling like
+`sqrt(E_LC)`. It runs on any file with the `LayerCluster` + `SimCluster`
+collections (the truth association is the CMS one, best = smallest score); the
+layer number is rebuilt from `|z|` since the files do not store it.
+
+```bash
+$PY scripts/plot_shower_profiles.py \
+    --input data/taus_FineCalo_with_tracksters/taus_fineCalo.parquet \
+    --outdir plots/shower_profiles
+```
+
+The event is auto-selected as the one (among `--max-events`) whose weakest
+per-class particle is the most energetic, so that every panel shows a real
+shower; `--event N` overrides it, `--classes 4,1,2,0,3` adds the muon panel, and
+`--min-clusters` / `--min-energy` set how good a particle has to be to qualify.
+Writes one `profile_<type>.png` per type, a `profile_comparison.png` with all of
+them on a common `y` span, and `shower_profiles.json`.
+
 ### Toy-calorimeter (`hg_toy_calorimeter`) exploration
 
 Operate on a stage-1 toy-calorimeter parquet file (flat, one record per event,
