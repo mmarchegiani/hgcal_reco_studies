@@ -27,6 +27,7 @@ be forced with `--node-collection`.
 | `evaluate_maskformer.py` | Main evaluation: resolution of `e`/`eta`/`sinphi`/`cosphi`/`r` (inclusive and split by true particle class), clustering efficiency vs. energy/eta/type, and supporting diagnostics. Writes `metrics.json` + `summary.txt`. |
 | `energy_investigation.py` | Follow-up on the predicted-vs-true cluster energy deficit: response vs. true and vs. predicted energy, log-log fit of the compression, per-event energy budget, truth closure and self-consistency checks. Writes `energy_metrics.json` + `energy_summary.txt`. |
 | `check_energy_scaling.py` | One-off check of whether the rechit-derived `min_max_sym`/`sqrt` energy scaling is degenerate when applied to LayerClusters. |
+| `closeby_photons_merged.py` | CloseBy di-photon samples (`--input` = the `eval` directory with one folder per distance): selects the events with a single TICL CLUEstering trackster at d ≤ `--max-distance` (2 cm), draws Truth / MaskFormer / TICL event displays in (eta, phi) and 3D, and plots the MaskFormer per-photon response and the total-energy response of MaskFormer vs. TICL. Writes `closeby_merged_metrics.json`. |
 | `hgcal_eval_common.py` | Shared library (data loading, CMS style, profiles, helpers) — not run directly. |
 
 ```bash
